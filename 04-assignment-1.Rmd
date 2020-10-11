@@ -1,0 +1,170 @@
+---
+title: "Fundamentals of Computing and Data Display"
+author: "Schultz_Robert"
+subtitle: Exercise
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+## Setup
+
+```{r}
+library(tidyverse)
+library(gtrendsR)
+library(censusapi)
+```
+
+## Google Trends
+
+In this notebook, your task is to combine and explore web data using APIs and `dplyr`. Try to utilize piping in this notebook when writing your code.
+
+Our first data source is the Google Trends API. This time we are interested in the search trends for `crime` and `loans` in Illinois in the year 2016.
+
+```{r}
+res <- gtrends(c("crime", "loans"), geo = "US-IL", time = "2016-01-01 2016-12-31", low_search_volume = T)
+plot(res)
+```
+
+The resulting list includes a `data.frame` with the search interest by city. Extract this data set as a `tibble` and print the first observations.
+
+```{r}
+city <- as.tibble(res$interest_by_city)
+head(city)
+```
+
+To get some first insight, print the mean, median and variance of the search hits for the keywords `crime` and `loans`. This can be done via piping with `dplyr`.
+
+```{r}
+city %>%
+  group_by(keyword) %>%
+  summarise(mean_hits = mean(hits, na.rm = T),
+            median_hits = median(hits, na.rm = T),
+            variance_hits = var(hits, na.rm = T))
+
+```
+
+It might be easier if we had the search hits info for both search terms in two separate variables. Transform the `tibble` accordingly and save the result as a new object.
+
+```{r}
+city_2 <- spread(city, key = keyword, value = hits)
+head(city_2)
+```
+
+Which cities (locations) have the highest search frequency for `loans`? Print the first rows of the new `tibble` from the previous chunk, ordered by `loans`.
+
+```{r}
+city %>%
+  filter(keyword == "loans") %>%
+  arrange(desc(hits)) %>%
+  head()
+```
+
+Is there a relationship between the search intensities between the two keywords we used? Create a scatterplot of `crime` and `loans` with `qplot()`.
+
+```{r}
+city_2 %>%
+  qplot(x = crime, y = loans, data = .) +
+    scale_y_continuous(limits = c(15, 115)) +
+     scale_x_continuous(limits = c(5, 25))
+```
+
+Little to no association between our two variables of interest. This in large part could be due to our sample size. *Note - I ran the plot and then edited by X and Y lim to be closer to the values so my plot looked cleaner* 
+
+## Google Trends + ACS
+
+Now lets add another data set. The censusapi package provides a nice R interface for communicating with this API. However, before running queries we need an access key. This (easy) process can be completed here:
+
+https://api.census.gov/data/key_signup.html
+
+Once you have an access key, store this key in the cs_key object. We will use this object in all following API queries.
+
+```{r}
+cs_key <- "c44d1ce68979401752cf9e7d2a1ba929174a1e87"
+```
+
+In the following, we request basic socio-demographic information (population, median age, median household income, income per capita) for cities and villages in the state of Illinois.
+
+```{r}
+acs_il <- getCensus(name = "acs/acs5",
+                    vintage = 2016, 
+                    vars = c("NAME", "B01001_001E", "B06002_001E", "B19013_001E", "B19301_001E"), 
+                    region = "place:*", 
+                    regionin = "state:17",
+                    key = cs_key)
+head(acs_il)
+```
+
+Convert values that represent missings to NAs.
+
+```{r}
+acs_il[acs_il == -666666666] <- NA
+```
+
+Now, it might be useful to rename the socio-demographic variables (`B01001_001E` etc.) in our data set and assign more meaningful names. 
+
+```{r}
+acs_il <-
+  acs_il %>%
+  rename(pop = B01001_001E, age = B06002_001E, hh_income = B19013_001E, income = B19301_001E)
+```
+
+Print the first rows of the variable `NAME`.
+
+```{r}
+head(acs_il$NAME)
+```
+
+It seems like we could try to use this location information listed above to merge this data set with the Google Trends data. However, we first have to clean `NAME` so that it has the same structure as `location` in the search interest by city data. Try to add a new variable `location` to the ACS data that only includes city names. 
+
+```{r}
+acs <-acs_il %>%
+separate(NAME, c("location", "state"), sep = ",") %>%
+mutate(location = gsub(" village| city| CDP| town", "", location))
+```
+
+On this basis, lets first check how many cities don't appear in both data sets, i.e. cannot be matched.
+
+```{r}
+ruthere <- acs %>%
+  anti_join(city_2, by = "location")
+
+dim(ruthere)
+```
+
+That's a lot, unfortunately. However, create a new data set by joining the Google Trends and the ACS data. Keep only cities that appear in both data sets. 
+
+```{r}
+acs_hits <- acs %>%
+  inner_join(city_2, by = "location")
+```
+
+Now we can utilize information from both data sources. As an example, print the `crime` and `loans` search popularity for the first ten cities in Illinois with the highest population (in 2016).
+
+```{r}
+acs_pop <- acs_hits %>%
+  arrange(desc(pop)) %>% .[1:10,]
+  print(acs_pop[c("location","pop", "crime", "loans")])
+```
+
+Next, compute the mean of the search popularity for both keywords for cities that have an above average median household income and for those that have an below average median household income. When building your pipe, start with creating the grouping variable and then proceed with the remaining tasks.
+
+```{r}
+acs_hits %>% 
+  mutate(RichPoor = if_else(hh_income>mean(hh_income), "Above Average Median HH$", "Below Average Median HH$")) %>%
+  group_by(RichPoor) %>%
+  summarise(mean_hits_loans = mean(loans, na.rm = T),
+            mean_hits_crime = mean(crime, na.rm = T))
+```
+
+Is there a relationship between the median household income and the search popularity of `loans`? Plot a scatterplot with `qplot()`.
+
+```{r}
+acs_hits %>%
+  qplot(x = hh_income, y = loans, data = .) +
+  scale_y_continuous(limits = c(30, 115)) +
+     scale_x_continuous(limits = c(40000, 125000)) 
+```
+
+With our limited number of observations,does seem to be correlation between loans ~ income. Lower income tend to have more searches for loans. We could test this with more data and running a lm (OLS) to see a fitted line. 
